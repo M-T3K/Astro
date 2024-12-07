@@ -1,0 +1,260 @@
+﻿@page "/snr"
+@using AstroCalculator.DataModels
+@using Helpers
+
+<PageTitle>SNR Calculator</PageTitle>
+
+<h1>Signal-to-noise calculator for CCD photometry</h1>
+
+<h2>This calculator is a direct port of <a href="http://spiff.rit.edu/richmond/signal.shtml"a> this calculator</a>.</h2>
+
+<EditForm Model="Model" OnValidSubmit="CalculateSNR" FormName="SNRCalculatorForm">
+    <DataAnnotationsValidator />
+    <ValidationSummary/>
+    <div>
+        <label>
+            <strong>Filter</strong>: This calculator uses Bessell filters, which are close to Johnson UBV, Cousins RI. 
+            <InputSelect @bind-Value="Model!.FilterValue">
+                <option checked="@(Model!.FilterValue == "None")" value="None">None</option>
+                <option checked="@(Model!.FilterValue == "U")" value="U">U</option>
+                <option checked="@(Model!.FilterValue == "B")" value="B">B</option>
+                <option checked="@(Model!.FilterValue == "V")" value="V">V</option>
+                <option checked="@(Model!.FilterValue == "R")" value="R">R</option>
+                <option checked="@(Model!.FilterValue == "I")" value="I">I</option>
+            </InputSelect>
+        </label>
+    </div>
+
+    <div>
+        <label>
+            <strong>Mag Limits</strong>: List values for magnitudes between 
+            <InputNumber @bind-Value="@Model!.LowerMagnitudeLimit"></InputNumber> 
+            and 
+            <InputNumber @bind-Value="Model!.UpperMagnitudeLimit"></InputNumber> 
+            at intervals of 
+            <InputNumber @bind-Value="Model!.MagInterval"></InputNumber> 
+            mag. 
+        </label>
+    </div>
+
+    <div>
+        <label>
+            <strong>Telescope Diameter</strong>(cm): 
+            <InputNumber @bind-Value="@Model!.TelescopeDiameterCM"></InputNumber>
+        </label>
+    </div>
+
+    <div>
+        <label>
+            <strong>Overall QE</strong>(0.0 - 1.0): primarily determined by CCD (for cheap CCD = 0.3, for expensive CCD = 0.7)
+            <InputNumber @bind-Value="@Model!.OverallQE"></InputNumber>
+        </label>
+    </div>
+
+    <div>
+        <label>
+            <strong>Pixel Size</strong>(arcsec/pixel): 
+            <InputNumber @bind-Value="@Model!.PixelSizeArcsecPerPixel"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>CCD Readout Noise</strong>(electrons): 
+            <InputNumber @bind-Value="@Model!.CCDReadoutNoise"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>Sky Brightness</strong>(mag per sq. arcsec): primarily determined by environment (suburbs = 17, country = 19, mountains = 21) 
+            <InputNumber @bind-Value="@Model!.SkyBrightnessMagPerSqArcsec"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>Airmass</strong>: 
+            <InputNumber @bind-Value="@Model!.AirMass"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>Exposure Time</strong>(seconds): 
+            <InputNumber @bind-Value="@Model!.ExposureTimeInSeconds"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>FWHM</strong>(arcsec): 
+            <InputNumber @bind-Value="@Model!.FWHMArcsec"></InputNumber>
+        </label>
+    </div>
+    <div>
+        <label>
+            <strong>Radius for Photometry</strong>:
+            <InputNumber @bind-Value="@Model!.RadiusForPhotometry"></InputNumber>
+        </label>
+    </div>
+
+    <div>
+        <label>
+            Should use <strong>Quick Fractions</strong> in the calculation? This is <strong>faster but less accurate</strong>.
+            <InputCheckbox checked="@shouldUseQuickFractions" @bind-Value="@shouldUseQuickFractions"></InputCheckbox>
+        </label>
+    </div>
+</EditForm>
+
+
+
+<button class="btn btn-primary" @onclick="CalculateSNR">Calculate SNR</button>
+<h1>SNR Results</h1>
+<div>
+    <ul>
+    @foreach (var elem in calculatedSNRs) {
+        <li>
+            <strong>Magnitude:</strong> @elem.mag, <strong>SNR:</strong> @elem.snr
+        </li>
+    }
+    </ul>
+</div>
+
+@code {
+
+        [SupplyParameterFromForm]
+        private SNRData? Model { get; set; }
+
+        private List<(double mag, double snr)> calculatedSNRs = [];
+
+        private bool shouldUseQuickFractions = false;
+
+        protected override void OnInitialized() =>
+            Model ??= new() { };
+
+        private void CalculateSNR()
+        {
+            var num_photons = GetNumberPhotonsFromFilter(Model.FilterValue);
+            var extinct_coeff = GetExtinctCoeff(Model.FilterValue);
+
+            if(num_photons < 0) {
+                throw new NotImplementedException("Number of photons is less than 0. Something went wrong.");
+            }
+
+            var pixelsInsideAperture = (Math.PI * Model.RadiusForPhotometry * Model.RadiusForPhotometry) / (Model.PixelSizeArcsecPerPixel * Model.PixelSizeArcsecPerPixel);
+
+            double fraction = shouldUseQuickFractions ? 
+                AstroMath.QuickFraction(Model.FWHMArcsec, Model.RadiusForPhotometry) 
+                : AstroMath.AccurateFraction(Model.FWHMArcsec, Model.RadiusForPhotometry, Model.PixelSizeArcsecPerPixel);
+
+            for (var mag = Model.LowerMagnitudeLimit; mag <= Model.UpperMagnitudeLimit; mag += Model.MagInterval) {
+
+                // calculate # of electrons collected on the CCD from star, total
+                var x = Math.Pow(10.0, -0.4 * mag) * num_photons;
+                x *= Model.ExposureTimeInSeconds;
+                x *= Math.PI * Model.TelescopeDiameterCM * Model.TelescopeDiameterCM * 0.25;
+                x *= Model.OverallQE;
+
+                var star_electrons = x;
+
+                // decrease the # of electrons from star, due to extinction
+                x = Model.AirMass * extinct_coeff;
+                star_electrons *= Math.Pow(10.0, -0.4 * x);
+
+                // now calculate # of electrons collected on CCD from sky, per pixel
+
+                x = Math.Pow(10.0, -0.4 * Model.SkyBrightnessMagPerSqArcsec) * num_photons;
+                x *= Model.ExposureTimeInSeconds;
+                x *= Math.PI * Model.TelescopeDiameterCM * Model.TelescopeDiameterCM * 0.25;
+                x *= Model.OverallQE;
+                x *= Model.PixelSizeArcsecPerPixel * Model.PixelSizeArcsecPerPixel;
+
+                var sky_electrons_per_pixel = x;
+
+                // this is the total number of electrons from star inside aperture
+                star_electrons *= fraction;
+
+                // this is the total number of electrons from sky inside aperture
+                var sky_electrons = sky_electrons_per_pixel * pixelsInsideAperture;
+
+                // this is the total number of electrons from readout in aperture
+                var read_electrons = Model.CCDReadoutNoise * Model.CCDReadoutNoise * pixelsInsideAperture;
+
+                // now we can calculate signal - to - noise
+
+                var signal = star_electrons;
+                var noise = Math.Sqrt(read_electrons + sky_electrons + star_electrons);
+
+                var signal_to_noise = signal / noise;
+
+                calculatedSNRs.Add((mag, signal_to_noise));
+        }
+
+    }
+
+    // Comment copied from original code at http://spiff.rit.edu/richmond/signal.cgi
+    // Accessed on 07/12/24
+    // ############################################################################
+    // # PROCEDURE: mag_zeropoint
+    // # 
+    // # DESCRIPTION: Given a filter name, return the number of photons per
+    // #              square centimeter per second which a star of zero'th 
+    // #              magnitude would produce above the atmosphere.
+    // #              We assume that the star has a spectrum like Vega's.
+    // #              
+    // #              The numbers are pre-calculated and we just pick the
+    // #              appropriate one for the given filter.
+    // #              
+    // # RETURNS:     Number of photons per sq.cm. per sec from zero'th mag star.
+    private double GetNumberPhotonsFromFilter(string filter)
+    {
+        switch (filter)
+        {
+            case "None":
+                return 4.32e+06;
+            case "U":
+                return 5.50e+05;
+            case "B":
+                return 3.91e+05;
+            case "V":
+                return 8.66e+05;
+            case "R":
+                return 1.10e+06;
+            case "I":
+                return 6.75e+05;
+            default:
+                throw new NotImplementedException($"Filter {filter} is not implemented, please use one from the dropdown box and stop procrastinating.");
+        }
+    }
+
+
+    // Comment copied from original code at http://spiff.rit.edu/richmond/signal.cgi
+    // Accessed on 07/12/24
+    //############################################################################
+    //# PROCEDURE: get_extinct_coeff
+    //#
+    //# DESCRIPTION: Given a filter name, return an extinction coefficient.
+    //# The numbers are only approximate.
+    //# We use the V-band value if there's no filter.
+    //#
+    //# RETURNS:     Extinction coefficient (mag/airmass)
+    //#
+
+    public double GetExtinctCoeff(string filter)
+    {
+        switch (filter)
+        {
+            case "None":
+                return 0.20;
+            case "U":
+                return 0.60;
+            case "B":
+                return 0.40;
+            case "V":
+                return 0.20;
+            case "R":
+                return 0.10;
+            case "I":
+                return 0.08;
+            default:
+                throw new NotImplementedException($"Filter {filter} is not implemented, please use one from the dropdown box and stop procrastinating.");
+        }
+    }
+
+}
